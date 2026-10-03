@@ -20,6 +20,9 @@ type FS struct {
 	nodes map[string]*fskit.Node
 	mu    sync.Mutex
 	log   *slog.Logger
+
+	watchers map[*watcher]struct{} // see watch.go
+	watchMu  sync.Mutex
 }
 
 func New() *FS {
@@ -254,6 +257,7 @@ func (fsys *FS) OpenContext(ctx context.Context, name string) (f fs.File, err er
 		}
 		if !n.IsDir() {
 			// Ordinary file
+			fsys.watchWrites(n, name)
 			return fs.OpenContext(ctx, n, ".")
 		}
 	}
@@ -326,6 +330,7 @@ func (fsys *FS) Create(name string) (f fs.File, err error) {
 	defer func() {
 		fsys.log.Debug("create", "name", name, "err", err)
 	}()
+	defer func() { fsys.changed(err, OpCreate, name) }()
 	name = path.Clean(name)
 	if !fs.ValidPath(name) {
 		return nil, &fs.PathError{Op: "create", Path: name, Err: fs.ErrNotExist}
@@ -351,6 +356,7 @@ func (fsys *FS) Create(name string) (f fs.File, err error) {
 	fsys.updateDirSize(dir)
 	fsys.mu.Unlock()
 
+	fsys.watchWrites(node, name)
 	// Open the file AFTER releasing fsys.mu to avoid deadlock
 	return node.Open(".")
 }
@@ -359,6 +365,7 @@ func (fsys *FS) Mkdir(name string, perm fs.FileMode) (err error) {
 	defer func() {
 		fsys.log.Debug("mkdir", "name", name, "perm", perm, "err", err)
 	}()
+	defer func() { fsys.changed(err, OpCreate, name) }()
 	name = path.Clean(name)
 	if !fs.ValidPath(name) {
 		return &fs.PathError{Op: "mkdir", Path: name, Err: fs.ErrNotExist}
@@ -396,6 +403,7 @@ func (fsys *FS) Chmod(name string, mode fs.FileMode) (err error) {
 	defer func() {
 		fsys.log.Debug("chmod", "name", name, "mode", mode, "err", err)
 	}()
+	defer func() { fsys.changed(err, OpAttrib, name) }()
 	name = path.Clean(name)
 	if !fs.ValidPath(name) {
 		return &fs.PathError{Op: "chmod", Path: name, Err: fs.ErrNotExist}
@@ -427,6 +435,7 @@ func (fsys *FS) Chown(name string, uid, gid int) (err error) {
 	defer func() {
 		fsys.log.Debug("chown", "name", name, "uid", uid, "gid", gid, "err", err)
 	}()
+	defer func() { fsys.changed(err, OpAttrib, name) }()
 	name = path.Clean(name)
 	if !fs.ValidPath(name) {
 		return &fs.PathError{Op: "chown", Path: name, Err: fs.ErrNotExist}
@@ -458,6 +467,7 @@ func (fsys *FS) Chtimes(name string, atime, mtime time.Time) (err error) {
 	defer func() {
 		fsys.log.Debug("chtimes", "name", name, "atime", atime, "mtime", mtime, "err", err)
 	}()
+	defer func() { fsys.changed(err, OpAttrib, name) }()
 	name = path.Clean(name)
 	if !fs.ValidPath(name) {
 		return &fs.PathError{Op: "chtimes", Path: name, Err: fs.ErrNotExist}
@@ -488,6 +498,7 @@ func (fsys *FS) Truncate(name string, size int64) (err error) {
 	defer func() {
 		fsys.log.Debug("truncate", "name", name, "size", size, "err", err)
 	}()
+	defer func() { fsys.changed(err, OpWrite, name) }()
 	name = path.Clean(name)
 	if !fs.ValidPath(name) {
 		return &fs.PathError{Op: "truncate", Path: name, Err: fs.ErrNotExist}
@@ -532,6 +543,7 @@ func (fsys *FS) Remove(name string) (err error) {
 	defer func() {
 		fsys.log.Debug("remove", "name", name, "err", err)
 	}()
+	defer func() { fsys.changed(err, OpRemove, name) }()
 	name = path.Clean(name)
 	if !fs.ValidPath(name) {
 		return &fs.PathError{Op: "remove", Path: name, Err: fs.ErrNotExist}
@@ -576,6 +588,12 @@ func (fsys *FS) Remove(name string) (err error) {
 func (fsys *FS) Rename(oldpath, newpath string) (err error) {
 	defer func() {
 		fsys.log.Debug("rename", "oldpath", oldpath, "newpath", newpath, "err", err)
+	}()
+	defer func() {
+		if err == nil && oldpath != newpath {
+			fsys.notify(OpRemove, oldpath)
+			fsys.notify(OpCreate, newpath)
+		}
 	}()
 	oldpath = path.Clean(oldpath)
 	newpath = path.Clean(newpath)
@@ -666,6 +684,7 @@ func (fsys *FS) Symlink(oldname, newname string) (err error) {
 	defer func() {
 		fsys.log.Debug("symlink", "oldname", oldname, "newname", newname, "err", err)
 	}()
+	defer func() { fsys.changed(err, OpCreate, newname) }()
 	newname = path.Clean(newname)
 	if !fs.ValidPath(newname) {
 		return &fs.PathError{Op: "symlink", Path: oldname, Err: fs.ErrInvalid}
@@ -714,4 +733,10 @@ func (fsys *FS) Readlink(name string) (link string, err error) {
 	}
 
 	return string(n.Data()), nil
+}
+
+// watchWrites has a file node opened as name tell the watchers when it is
+// written to (fskit calls it as a file on it closes with new contents)
+func (fsys *FS) watchWrites(n *fskit.Node, name string) {
+	fskit.SetOnChange(n, func() { fsys.notify(OpWrite, name) })
 }

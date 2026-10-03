@@ -26,6 +26,10 @@ type Node struct {
 	reader io.Reader
 	writer io.Writer
 
+	// onChange, when set, is called after a file opened on this node is
+	// closed with new contents (see SetOnChange)
+	onChange func()
+
 	mu sync.Mutex
 }
 
@@ -199,6 +203,14 @@ func SetName(n *Node, name string) {
 	n.path = name
 }
 
+// SetOnChange sets what is called when a file opened on n is closed after
+// being written to (the node's new data in place); nil for nothing.
+func SetOnChange(n *Node, fn func()) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.onChange = fn
+}
+
 func SetData(n *Node, data []byte) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -297,6 +309,12 @@ func (f *nodeFile) Close() (err error) {
 	if f.dirty && f.inode != nil {
 		SetData(f.inode, f.data)
 		SetModTime(f.inode, f.modTime)
+		f.inode.mu.Lock()
+		onChange := f.inode.onChange
+		f.inode.mu.Unlock()
+		if onChange != nil {
+			defer onChange()
+		}
 	}
 
 	f.closed = true

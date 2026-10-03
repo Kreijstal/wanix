@@ -28,6 +28,7 @@ import (
 	"tractor.dev/wanix/fs/pipe"
 	"tractor.dev/wanix/fs/signal"
 	"tractor.dev/wanix/fs/tarfs"
+	"tractor.dev/wanix/fs/watchfs"
 	"tractor.dev/wanix/misc"
 	"tractor.dev/wanix/misc/allocfs"
 	"tractor.dev/wanix/misc/jsutil"
@@ -57,6 +58,7 @@ func main() {
 		{"#vm", vm.New(root)},
 		{"#pipe", &pipe.Allocator{}},
 		{"#signal", &signal.Allocator{}},
+		{"#watch", watchfs.New(root.NS())},
 		// {"#ramfs", &memfs.Allocator{}},
 		{"#js", jsfs.NewFS(js.Global())},
 	}
